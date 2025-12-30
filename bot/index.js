@@ -1,58 +1,65 @@
-require("dotenv").config();
-const TelegramBot = require("node-telegram-bot-api");
-const axios = require("axios");
-const db = require("./db");
+import TelegramBot from "node-telegram-bot-api";
+import axios from "axios";
+import { createClient } from "@supabase/supabase-js";
+import dotenv from "dotenv";
 
+dotenv.config();
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
+
+// Telegram polling bot
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+
+// Save messages to Supabase
+const saveMessage = async (chat_id, text) => {
+  await supabase.from("messages").insert({
+    chat_id: String(chat_id),
+    text: text,
+  });
+}
 
 bot.on("message", async (msg) => {
   console.log("RECEIVED:", msg.text);
 
   if (!msg.text) return;
 
-  db.prepare(`
-    INSERT INTO messages (chat_id, user, text, timestamp)
-    VALUES (?, ?, ?, ?)
-  `).run(
-    msg.chat.id.toString(),
-    msg.from?.username || "unknown",
-    msg.text,
-    msg.date
-  );
-});
+  const chatId = msg.chat.id;
+  const text = msg.text;
 
-// Sentiment command
-bot.onText(/^\/sentiment(?:@\w+)?\s+([\s\S]+)/i, async (msg, match) => {
-  const text = match[1].trim();
+  // Handle /sentiment
+  if (text.startsWith("/sentiment")) {
+    const cleanedText = text.replace("/sentiment", "").trim();
+    await saveMessage(chatId, cleanedText);
 
-  try {
-    const res = await axios.post(`${process.env.AI_SERVICE_URL}/sentiment`, {
-      text
-    });
-
-    bot.sendMessage(msg.chat.id, `Sentiment: ${res.data.sentiment}`);
-  } catch (err) {
-    console.error(err);
-    bot.sendMessage(msg.chat.id, "Error processing request.");
+    try {
+      const res = await axios.post(`${process.env.AI_SERVICE_URL}/sentiment`, { text: cleanedText });
+      bot.sendMessage(chatId, `Sentiment: ${res.data.sentiment}`);
+    } catch (err) {
+      console.error(err);
+      bot.sendMessage(chatId, "Error processing request.");
+    }
   }
-});
 
+  // Handle /ask
+  else if (text.startsWith("/ask")) {
+    const cleanedText = text.replace("/ask", "").trim();
+    await saveMessage(chatId, cleanedText);
 
-// Ask command
-bot.onText(/^\/ask(?:@\w+)?\s+([\s\S]+)/i, async (msg, match) => {
-  const question = match[1].trim();
-  console.log("ASK:", question);
+    try {
+      const res = await axios.post(`${process.env.AI_SERVICE_URL}/ask`, { chat_id: chatId, question: cleanedText });
+      bot.sendMessage(chatId, res.data.answer);
+    } catch (err) {
+      console.error(err);
+      bot.sendMessage(chatId, "Error processing request.");
+    }
+  }
 
-  try {
-    const res = await axios.post(`${process.env.AI_SERVICE_URL}/ask`, {
-      chat_id: msg.chat.id.toString(),
-      question
-    });
-
-    bot.sendMessage(msg.chat.id, res.data.answer);
-  } catch (err) {
-    console.error(err);
-    bot.sendMessage(msg.chat.id, "Error processing request.");
+  // Save other messages
+  else {
+    await saveMessage(chatId, text);
   }
 });
 
