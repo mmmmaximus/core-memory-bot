@@ -1,0 +1,7 @@
+flask
+requests
+chromadb
+sentence-transformers
+vaderSentiment
+python-dotenv
+huggingface-hub
