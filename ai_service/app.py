@@ -137,8 +137,5 @@ def ask():
     return jsonify({"answer": answer})
 
 if __name__ == "__main__":
-    # To run locally
-    # source venv/bin/activate LOCAL=1 python3 app.py
-    if os.environ.get("LOCAL") == "1":
-        port = int(os.environ.get("PORT", 8000))
-        app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
