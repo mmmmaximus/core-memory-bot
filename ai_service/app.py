@@ -1,191 +1,115 @@
 import os
 import re
-import requests
-import chromadb
-
 from flask import Flask, request, jsonify
+from dotenv import load_dotenv
 from supabase import create_client, Client
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import InferenceClient
-from dotenv import load_dotenv
 
-# -------------------------------------------------------------------
-# ENV
-# -------------------------------------------------------------------
+# Safety settings for deployment
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 load_dotenv()
 
+# ENV
 HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 HF_MODEL = os.getenv("HF_MODEL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# -------------------------------------------------------------------
-# Flask app
-# -------------------------------------------------------------------
 app = Flask(__name__)
 
-# -------------------------------------------------------------------
-# Lazy-loaded globals (IMPORTANT)
-# -------------------------------------------------------------------
-analyzer = None
-model = None
-chroma = None
-collection = None
-client = None
+# Lazy-loaded globals
+model: SentenceTransformer | None = None
+hf_client: InferenceClient | None = None
 supabase: Client | None = None
 
-# -------------------------------------------------------------------
-# Lazy initialization
-# -------------------------------------------------------------------
 def init_services():
-    global analyzer, model, chroma, collection, client, supabase
-
-    if analyzer is None:
-        analyzer = SentimentIntensityAnalyzer()
-
+    global model, hf_client, supabase
     if supabase is None:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
     if model is None:
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Load embedding model once
+        model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+    if hf_client is None:
+        hf_client = InferenceClient(model=HF_MODEL, api_key=HF_API_TOKEN)
 
-    if chroma is None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        chroma_dir = os.path.join(base_dir, "chroma_data")
-        os.makedirs(chroma_dir, exist_ok=True)
-
-        chroma = chromadb.Client(
-            chromadb.config.Settings(
-                persist_directory=chroma_dir
-            )
-        )
-        collection = chroma.get_or_create_collection("chat")
-
-    if client is None:
-        client = InferenceClient(
-            model=HF_MODEL,
-            api_key=HF_API_TOKEN
-        )
-
-# -------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------
 def clean_output(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-def get_messages(chat_id):
+def generate_answer(context: str, question: str) -> str:
     init_services()
-
-    response = (
-        supabase
-        .table("messages")
-        .select("text")
-        .eq("chat_id", str(chat_id))
-        .order("created_at")
-        .execute()
-    )
-
-    return [row["text"] for row in response.data]
-
-def generate_answer(context, question):
-    init_services()
-
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful assistant.\n"
-                "Use the provided context to answer the question.\n"
-                "Provide ONLY the final answer."
-            )
-        },
-        {
-            "role": "user",
-            "content": f"""
-Context:
-{context}
-
-Question:
-{question}
-"""
-        }
+        {"role": "system", "content": "You are a helpful assistant. Use the context to answer. Provide ONLY the final answer."},
+        {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{question}"}
     ]
-
-    response = client.chat.completions.create(
+    response = hf_client.chat.completions.create(
         messages=messages,
         max_tokens=300,
         temperature=0.3,
     )
-
     return clean_output(response.choices[0].message.content)
 
-# -------------------------------------------------------------------
-# Routes
-# -------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
 
-@app.route("/sentiment", methods=["POST"])
-def sentiment():
+@app.route("/ingest", methods=["POST"])
+def ingest():
+    """Endpoint called by Node.js for every message to generate embeddings and save to Supabase."""
     init_services()
 
-    text = request.json["text"]
-    score = analyzer.polarity_scores(text)["compound"]
+    chat_id = str(request.json.get("chat_id"))
+    text = request.json.get("text")
 
-    label = (
-        "positive" if score > 0.05
-        else "negative" if score < -0.05
-        else "neutral"
-    )
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
 
-    return jsonify({"sentiment": label})
+    # Generate embedding using the Sentence Transformer
+    embedding = model.encode(text).tolist()
+
+    # Insert message and embedding into Supabase
+    try:
+        supabase.table("messages").insert({
+            "chat_id": chat_id,
+            "text": text,
+            "embedding": embedding
+        }).execute()
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        print(f"Ingestion Database Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/ask", methods=["POST"])
 def ask():
     init_services()
-
-    chat_id = request.json["chat_id"]
+    chat_id = str(request.json["chat_id"])
     question = request.json["question"]
 
-    messages = get_messages(chat_id)
-    if not messages:
-        return jsonify({"answer": "No chat history found for this chat."})
+    # Query vector similarity using the Supabase RPC function 'match_messages'
+    q_emb = model.encode(question).tolist()
 
-    embeddings = model.encode(messages)
+    try:
+        rpc_resp = supabase.rpc("match_messages", {
+            "query_embedding": q_emb,
+            "match_threshold": 0.5,
+            "match_count": 5,
+            "p_chat_id": chat_id
+        }).execute()
 
-    existing_ids = set(collection.get()["ids"])
-    new_docs, new_embeddings, new_ids = [], [], []
+        if not rpc_resp.data:
+            return jsonify({"answer": "I don't have enough chat history to answer that yet."})
 
-    for i, msg in enumerate(messages):
-        msg_id = f"{chat_id}-{i}"
-        if msg_id not in existing_ids:
-            new_docs.append(msg)
-            new_embeddings.append(embeddings[i].tolist())
-            new_ids.append(msg_id)
+        # Build context and generate answer
+        context = "\n".join([row["text"] for row in rpc_resp.data])
+        answer = generate_answer(context, question)
+        return jsonify({"answer": answer})
 
-    if new_docs:
-        collection.add(
-            documents=new_docs,
-            embeddings=new_embeddings,
-            ids=new_ids
-        )
+    except Exception as e:
+        print(f"Ask Route Error: {e}")
+        return jsonify({"answer": "Error retrieving relevant history."}), 500
 
-    q_emb = model.encode([question])[0]
-    results = collection.query(
-        query_embeddings=[q_emb.tolist()],
-        n_results=5
-    )
-
-    context = "\n".join(results["documents"][0])
-    answer = generate_answer(context, question)
-
-    return jsonify({"answer": answer})
-
-# -------------------------------------------------------------------
-# Local run (ignored by Gunicorn on Render)
-# -------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

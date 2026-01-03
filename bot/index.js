@@ -22,44 +22,26 @@ const saveMessage = async (chat_id, text) => {
 }
 
 bot.on("message", async (msg) => {
-  console.log("RECEIVED:", msg.text);
-
   if (!msg.text) return;
 
   const chatId = msg.chat.id;
-  const text = msg.text;
-
-  // Handle /sentiment
-  if (text.startsWith("/sentiment")) {
-    const cleanedText = text.replace("/sentiment", "").trim();
-    await saveMessage(chatId, cleanedText);
+  let text = msg.text;
+  if (text.startsWith("/ask")) {
+    text = text.replace("/ask", "").trim();
 
     try {
-      const res = await axios.post(`${process.env.AI_SERVICE_URL}/sentiment`, { text: cleanedText });
-      bot.sendMessage(chatId, `Sentiment: ${res.data.sentiment}`);
-    } catch (err) {
-      console.error(err);
-      bot.sendMessage(chatId, "Error processing request.");
-    }
-  }
-
-  // Handle /ask
-  else if (text.startsWith("/ask")) {
-    const cleanedText = text.replace("/ask", "").trim();
-    await saveMessage(chatId, cleanedText);
-
-    try {
-      const res = await axios.post(`${process.env.AI_SERVICE_URL}/ask`, { chat_id: chatId, question: cleanedText });
+      const res = await axios.post(`${process.env.AI_SERVICE_URL}/ask`, { chat_id: chatId, question: text });
       bot.sendMessage(chatId, res.data.answer);
     } catch (err) {
-      console.error(err);
       bot.sendMessage(chatId, "Error processing request.");
     }
   }
 
-  // Save other messages
-  else {
-    await saveMessage(chatId, text);
+  // Ingest EVERY message into the Vector DB via the Python service
+  try {
+    await axios.post(`${process.env.AI_SERVICE_URL}/ingest`, { chat_id: chatId, text: text });
+  } catch (err) {
+    console.error("Vector Ingestion Error:", err.message);
   }
 });
 

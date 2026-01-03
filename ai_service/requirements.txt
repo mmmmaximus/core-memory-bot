@@ -1,9 +1,19 @@
-flask
-requests
-chromadb
-sentence-transformers
-vaderSentiment
-python-dotenv
-huggingface-hub
-supabase
-gunicorn
+# --- Web server ---
+flask>=3.0.0
+gunicorn>=21.2.0
+
+# --- Environment ---
+python-dotenv>=1.0.1
+
+# --- AI / NLP ---
+sentence-transformers>=2.6.0
+torch>=2.1.0
+
+# --- Hugging Face ---
+huggingface-hub>=0.21.4
+
+# --- Database ---
+supabase>=2.3.0
+
+# --- Networking ---
+requests>=2.31.0
