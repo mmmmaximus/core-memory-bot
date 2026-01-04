@@ -7,7 +7,7 @@ semantic Q&A using a Retrieval-Augmented Generation (RAG) pipeline.
 - Telegram Bot API (Node.js)
 - Python (Flask)
 - Sentence-Transformers
-- ChromaDB
+- Supabase
 - Hugging Face Inference API
 
 ## Setup
